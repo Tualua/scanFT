@@ -1,4 +1,4 @@
-module github.com/srwiley/scanFT
+module github.com/Tualua/scanFT
 
 go 1.17
 

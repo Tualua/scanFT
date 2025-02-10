@@ -11,6 +11,8 @@ import (
 	"image/color"
 	"image/draw"
 	"math"
+
+	"github.com/srwiley/rasterx"
 )
 
 // A Span is a horizontal segment of pixels with constant alpha. X0 is an
@@ -28,6 +30,7 @@ type (
 	// may use all of ss as scratch space during the call.
 	Painter interface {
 		Paint(ss []Span, done bool, clip image.Rectangle)
+		SetColor(clr interface{})
 	}
 
 	// The PainterFunc type adapts an ordinary function to the Painter interface.
@@ -65,9 +68,20 @@ type (
 		cr, cg, cb, ca uint32
 	}
 
+	// RGBAColFuncPainter is a Painter that paints Spans onto a *image.RGBA,
+// and uses a color function as a the color source, or the composed RGBA
+// paint func for a solid color
+	RGBAColFuncPainter struct {
+		RGBAPainter
+		//Op draw.Op
+		// cr, cg, cb and ca are the 16-bit color to paint the spans.
+		colorFunc rasterx.ColorFunc
+	}
+
 	// A MonochromePainter wraps another Painter, quantizing each Span's alpha to
 	// be either fully opaque or fully transparent.
 	MonochromePainter struct {
+		AlphaThreshold uint32
 		Painter   Painter
 		y, x0, x1 int
 	}
@@ -211,14 +225,34 @@ func (r *RGBAPainter) Paint(ss []Span, done bool, clip image.Rectangle) {
 	}
 }
 
-// SetColor sets the color to paint the spans.
-func (r *RGBAPainter) SetColor(c color.Color) {
+func (r *RGBAPainter) setColor(c color.Color) {
 	r.cr, r.cg, r.cb, r.ca = c.RGBA()
 }
+
+// SetColor sets the color to paint the spans.
+func (r *RGBAPainter) SetColor(clr interface{}) {
+	switch c := clr.(type) {
+	case color.Color:
+		r.setColor(c)
+	case rasterx.ColorFunc:
+		return
+	}
+}
+
+func (m *MonochromePainter) SetColor(clr interface{}) {
+	m.Painter.SetColor(clr)
+}
+
 
 // NewRGBAPainter creates a new RGBAPainter for the given image.
 func NewRGBAPainter(m *image.RGBA) *RGBAPainter {
 	return &RGBAPainter{Image: m}
+}
+
+func NewRGBAColFuncPainter(p *RGBAPainter) *RGBAColFuncPainter {
+	return &RGBAColFuncPainter{
+		RGBAPainter: *p,
+	}
 }
 
 // Paint delegates to the wrapped Painter after quantizing each Span's alpha
@@ -227,7 +261,7 @@ func (m *MonochromePainter) Paint(ss []Span, done bool, clip image.Rectangle) {
 	// We compact the ss slice, discarding any Spans whose alpha quantizes to zero.
 	j := 0
 	for _, s := range ss {
-		if s.Alpha >= 0x8000 {
+		if s.Alpha >= m.AlphaThreshold {
 			if m.y == s.Y && m.x1 == s.X0 {
 				m.x1 = s.X1
 			} else {
@@ -266,7 +300,10 @@ func (m *MonochromePainter) Paint(ss []Span, done bool, clip image.Rectangle) {
 // NewMonochromePainter creates a new MonochromePainter that wraps the given
 // Painter.
 func NewMonochromePainter(p Painter) *MonochromePainter {
-	return &MonochromePainter{Painter: p}
+	return &MonochromePainter{
+		Painter: p,
+		AlphaThreshold: 0x9000,
+	}
 }
 
 // Paint delegates to the wrapped Painter after performing gamma-correction on
@@ -306,4 +343,66 @@ func NewGammaCorrectionPainter(p Painter, gamma float64) *GammaCorrectionPainter
 	g := &GammaCorrectionPainter{Painter: p}
 	g.SetGamma(gamma)
 	return g
+}
+
+// Paint satisfies the Painter interface.
+func (r *RGBAColFuncPainter) Paint(ss []Span, done bool, clip image.Rectangle) {
+	if r.colorFunc == nil {
+		r.RGBAPainter.Paint(ss, done, clip)
+		return
+	}
+	b := r.Image.Bounds()
+	if clip.Size() != image.ZP {
+		b = b.Intersect(clip)
+	}
+	for _, s := range ss {
+		if s.Y < b.Min.Y {
+			continue
+		}
+		if s.Y >= b.Max.Y {
+			return
+		}
+		if s.X0 < b.Min.X {
+			s.X0 = b.Min.X
+		}
+		if s.X1 > b.Max.X {
+			s.X1 = b.Max.X
+		}
+		if s.X0 >= s.X1 {
+			continue
+		}
+		// This code mimics drawGlyphOver in $GOROOT/src/image/draw/draw.go.
+		ma := s.Alpha
+		const m = 1<<16 - 1
+		i0 := (s.Y-r.Image.Rect.Min.Y)*r.Image.Stride + (s.X0-r.Image.Rect.Min.X)*4
+		i1 := i0 + (s.X1-s.X0)*4
+		cx := s.X0
+		if r.Op == draw.Over {
+			for i := i0; i < i1; i += 4 {
+				rcr, rcg, rcb, rca := r.colorFunc(cx, s.Y).RGBA()
+				//fmt.Println("rgb x y ", rcr, rcg, rcg, rca, cx, s.Y)
+				cx++
+				dr := uint32(r.Image.Pix[i+0])
+				dg := uint32(r.Image.Pix[i+1])
+				db := uint32(r.Image.Pix[i+2])
+				da := uint32(r.Image.Pix[i+3])
+				a := (m - (rca * ma / m)) * 0x101
+				r.Image.Pix[i+0] = uint8((dr*a + rcr*ma) / m >> 8)
+				r.Image.Pix[i+1] = uint8((dg*a + rcg*ma) / m >> 8)
+				r.Image.Pix[i+2] = uint8((db*a + rcb*ma) / m >> 8)
+				r.Image.Pix[i+3] = uint8((da*a + rca*ma) / m >> 8)
+			}
+		} else {
+			for i := i0; i < i1; i += 4 {
+				c := r.colorFunc(cx, s.Y)
+				cx++
+				rcr, rcb, rcg, rca := c.RGBA()
+
+				r.Image.Pix[i+0] = uint8(rcr * ma / m >> 8)
+				r.Image.Pix[i+1] = uint8(rcg * ma / m >> 8)
+				r.Image.Pix[i+2] = uint8(rcb * ma / m >> 8)
+				r.Image.Pix[i+3] = uint8(rca * ma / m >> 8)
+			}
+		}
+	}
 }

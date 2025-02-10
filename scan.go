@@ -21,12 +21,8 @@ package scanFT
 
 import (
 	"image"
-	"image/color"
 	"math"
 
-	"image/draw"
-
-	"github.com/srwiley/rasterx"
 	"golang.org/x/image/math/fixed"
 )
 
@@ -67,7 +63,7 @@ type (
 		cellBuf                [256]cell
 		cellIndexBuf           [64]int
 		spanBuf                [64]Span
-		Pntr                   *RGBAColFuncPainter
+		Pntr                   Painter
 		minX, minY, maxX, maxY fixed.Int26_6 // keep track of bounds
 	}
 )
@@ -92,13 +88,7 @@ func (s *ScannerFT) SetWinding(useNonZeroWinding bool) {
 }
 
 func (s *ScannerFT) SetColor(clr interface{}) {
-	switch c := clr.(type) {
-	case color.Color:
-		s.Pntr.SetColor(c)
-		s.Pntr.colorFunc = nil
-	case rasterx.ColorFunc:
-		s.Pntr.colorFunc = c
-	}
+	s.Pntr.SetColor(clr)
 }
 
 // findCell returns the index in r.cell for the cell corresponding to
@@ -430,7 +420,7 @@ func (s *ScannerFT) Draw() {
 
 func (s *ScannerFT) GetPathExtent() fixed.Rectangle26_6 {
 	//fmt.Println("Get path extent")
-	return fixed.Rectangle26_6{fixed.Point26_6{s.minX, s.minY}, fixed.Point26_6{s.maxX, s.maxY}}
+	return fixed.Rectangle26_6{Min: fixed.Point26_6{X: s.minX, Y: s.minY}, Max: fixed.Point26_6{X: s.maxX, Y: s.maxY}}
 }
 
 // Clear cancels any previous accumulated scans
@@ -475,82 +465,12 @@ func (s *ScannerFT) SetClip(rect image.Rectangle) {
 }
 
 // NewScannerFT creates a new Scanner with the given bounds.
-func NewScannerFT(width, height int, p *RGBAPainter) *ScannerFT {
+// func NewScannerFT(width, height int, p *RGBAPainter) *ScannerFT {
+	func NewScannerFT(width, height int, p Painter) *ScannerFT {
 	s := new(ScannerFT)
-	s.Pntr = &RGBAColFuncPainter{RGBAPainter: *p}
+	// s.Pntr = &RGBAColFuncPainter{RGBAPainter: *p}
+	s.Pntr = p
 	s.SetBounds(width, height)
 	s.UseNonZeroWinding = true
 	return s
-}
-
-// RGBAColFuncPainter is a Painter that paints Spans onto a *image.RGBA,
-// and uses a color function as a the color source, or the composed RGBA
-// paint func for a solid color
-type RGBAColFuncPainter struct {
-	RGBAPainter
-	//Op draw.Op
-	// cr, cg, cb and ca are the 16-bit color to paint the spans.
-	colorFunc rasterx.ColorFunc
-}
-
-// Paint satisfies the Painter interface.
-func (r *RGBAColFuncPainter) Paint(ss []Span, done bool, clip image.Rectangle) {
-	if r.colorFunc == nil {
-		r.RGBAPainter.Paint(ss, done, clip)
-		return
-	}
-	b := r.Image.Bounds()
-	if clip.Size() != image.ZP {
-		b = b.Intersect(clip)
-	}
-	for _, s := range ss {
-		if s.Y < b.Min.Y {
-			continue
-		}
-		if s.Y >= b.Max.Y {
-			return
-		}
-		if s.X0 < b.Min.X {
-			s.X0 = b.Min.X
-		}
-		if s.X1 > b.Max.X {
-			s.X1 = b.Max.X
-		}
-		if s.X0 >= s.X1 {
-			continue
-		}
-		// This code mimics drawGlyphOver in $GOROOT/src/image/draw/draw.go.
-		ma := s.Alpha
-		const m = 1<<16 - 1
-		i0 := (s.Y-r.Image.Rect.Min.Y)*r.Image.Stride + (s.X0-r.Image.Rect.Min.X)*4
-		i1 := i0 + (s.X1-s.X0)*4
-		cx := s.X0
-		if r.Op == draw.Over {
-			for i := i0; i < i1; i += 4 {
-				rcr, rcg, rcb, rca := r.colorFunc(cx, s.Y).RGBA()
-				//fmt.Println("rgb x y ", rcr, rcg, rcg, rca, cx, s.Y)
-				cx++
-				dr := uint32(r.Image.Pix[i+0])
-				dg := uint32(r.Image.Pix[i+1])
-				db := uint32(r.Image.Pix[i+2])
-				da := uint32(r.Image.Pix[i+3])
-				a := (m - (rca * ma / m)) * 0x101
-				r.Image.Pix[i+0] = uint8((dr*a + rcr*ma) / m >> 8)
-				r.Image.Pix[i+1] = uint8((dg*a + rcg*ma) / m >> 8)
-				r.Image.Pix[i+2] = uint8((db*a + rcb*ma) / m >> 8)
-				r.Image.Pix[i+3] = uint8((da*a + rca*ma) / m >> 8)
-			}
-		} else {
-			for i := i0; i < i1; i += 4 {
-				c := r.colorFunc(cx, s.Y)
-				cx++
-				rcr, rcb, rcg, rca := c.RGBA()
-
-				r.Image.Pix[i+0] = uint8(rcr * ma / m >> 8)
-				r.Image.Pix[i+1] = uint8(rcg * ma / m >> 8)
-				r.Image.Pix[i+2] = uint8(rcb * ma / m >> 8)
-				r.Image.Pix[i+3] = uint8(rca * ma / m >> 8)
-			}
-		}
-	}
 }

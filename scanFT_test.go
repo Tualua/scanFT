@@ -11,8 +11,8 @@ import (
 
 	"testing"
 
+	. "github.com/Tualua/scanFT"
 	. "github.com/srwiley/rasterx"
-	. "github.com/srwiley/scanFT"
 	"golang.org/x/image/math/fixed"
 )
 
